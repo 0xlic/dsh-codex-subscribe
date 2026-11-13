@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex 订阅",
+    "description": "管理独立的 ChatGPT 订阅 provider，可选开启文生图、图生图工具，支持设置生图模型、质量和账号。"
+  }
+}
