@@ -42,11 +42,12 @@ async function* accountStream(stream, route) {
 
 /** One instance per immutable account id, never a shared mutable active account. */
 class AccountAdapter extends LlmAdapter {
-  constructor(route, label, inner) {
+  constructor(route, label, inner, catalog) {
     super()
     this.route = route
     this.label = typeof label === 'function' ? label : () => label
     this.inner = inner
+    this.catalog = catalog
   }
 
   assertRoute(provider) {
@@ -75,16 +76,19 @@ class AccountAdapter extends LlmAdapter {
 
   async listModels(provider) {
     this.assertRoute(provider)
+    await this.catalog?.ready()
     return (await this.inner.listModels(NATIVE_PROVIDER)).map(model => ({ ...model, provider: this.route }))
   }
 
   async resolveModel(provider, model, signal) {
     this.assertRoute(provider)
+    await this.catalog?.ready({ signal })
     return { ...await this.inner.resolveModel(NATIVE_PROVIDER, model, signal), provider: this.route }
   }
 
   async prepareCall(provider, model, signal) {
     this.assertRoute(provider)
+    await this.catalog?.ready({ signal })
     const prepared = await this.inner.prepareCall(NATIVE_PROVIDER, model, signal)
     return {
       model: { ...prepared.model, provider: this.route },
@@ -95,9 +99,10 @@ class AccountAdapter extends LlmAdapter {
     }
   }
 
-  stream(options) {
+  async *stream(options) {
     this.assertRoute(options.provider)
-    return accountStream(this.inner.stream(nativeRequest(options, this.route)), this.route)
+    await this.catalog?.ready({ signal: options.signal })
+    yield* accountStream(this.inner.stream(nativeRequest(options, this.route)), this.route)
   }
 }
 
@@ -111,6 +116,7 @@ export function createAccountAdapter({
   label,
   getCredential,
   resolveAttachments,
+  catalog,
   providerFactory = openaiCodexProvider,
   adapterFactory = config => new PiAiAdapter(config),
 }) {
@@ -142,7 +148,7 @@ export function createAccountAdapter({
       },
     },
   }
-  const profiles = new Map([[NATIVE_PROVIDER, {
+  const profile = {
     provider: NATIVE_PROVIDER,
     displayName: 'ChatGPT subscription',
     piProvider,
@@ -156,9 +162,22 @@ export function createAccountAdapter({
     streamIdleTimeoutMs: 300_000,
     cacheRetention: 'short',
     transport: 'sse',
-  }]])
+  }
+  // PiAiAdapter caches collections by Map identity. Publish a new immutable
+  // profile snapshot when the directory changes; prepared requests retain theirs.
+  let models, profiles
+  const currentProfiles = () => {
+    if (!catalog) return profiles ??= new Map([[NATIVE_PROVIDER, profile]])
+    const next = catalog.getModels()
+    if (next !== models) {
+      models = next
+      const captured = next
+      profiles = new Map([[NATIVE_PROVIDER, { ...profile, piProvider: { ...piProvider, getModels: () => captured } }]])
+    }
+    return profiles
+  }
   const inner = adapterFactory({
-    profiles: () => profiles,
+    profiles: currentProfiles,
     async resolveApiKey() {
       // PiAiAdapter's resolver does not expose the request AbortSignal.
       let credential
@@ -176,5 +195,5 @@ export function createAccountAdapter({
     auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
     resolveAttachments,
   })
-  return new AccountAdapter(route, label, inner)
+  return new AccountAdapter(route, label, inner, catalog)
 }

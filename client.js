@@ -7,6 +7,7 @@ window.__ModuleLoader__.load({
     const dictionaries = {
       en: {
         imagePreparing: 'Preparing image request…', imageWorking: 'Generating image…', imageReady: 'Image generated', imageFailed: 'Image unavailable — see details', imageOriginal: 'Open saved file', imageDetails: 'Technical details', imageAttachments: 'Attachments', imagePreview: 'Image preview', imageSavedFile: 'Saved file', imagePreviewSize: 'Preview dimensions', imageOriginalSize: 'Original dimensions',
+        refreshModels: 'Refresh models', refreshingModels: 'Refreshing…', catalogBuiltin: 'Built-in catalog', catalogCached: 'Cached catalog', catalogOnline: 'Synced catalog', catalogFailed: 'Refresh failed; previous models kept', modelCount: 'models',
         title: 'Codex subscriptions', registered: 'Registered accounts', add: 'Add account', removeAll: 'Sign out all accounts',
         browser: 'Browser sign-in', device: 'Device code sign-in', empty: 'No registered accounts', loading: 'Loading…',
         edit: 'Edit suffix', suffix: 'Account suffix', save: 'Save', remove: 'Remove', renew: 'Sign in again', cancel: 'Cancel',
@@ -23,6 +24,7 @@ window.__ModuleLoader__.load({
       },
       zh: {
         imagePreparing: '正在准备图片请求…', imageWorking: '正在生成图片…', imageReady: '图片已生成', imageFailed: '图片不可用，请查看详情', imageOriginal: '打开已保存文件', imageDetails: '技术详情', imageAttachments: '附件信息', imagePreview: '图片预览', imageSavedFile: '已保存文件', imagePreviewSize: '预览尺寸', imageOriginalSize: '原图尺寸',
+        refreshModels: '刷新模型', refreshingModels: '正在刷新…', catalogBuiltin: '内置目录', catalogCached: '缓存目录', catalogOnline: '已同步目录', catalogFailed: '刷新失败，保留原目录', modelCount: '个模型',
         title: 'Codex 订阅', registered: '已登录账号', add: '添加账号', removeAll: '退出全部账号',
         browser: '浏览器登录', device: '设备代码登录', empty: '暂无已登录账号', loading: '加载中…',
         edit: '修改后缀', suffix: '账号后缀', save: '保存', remove: '移除', renew: '重新登录', cancel: '取消',
@@ -102,6 +104,7 @@ window.__ModuleLoader__.load({
           const [error, setError] = React.useState('')
           const [busy, setBusy] = React.useState(false)
           const [confirmAll, setConfirmAll] = React.useState(false)
+          const [refreshing, setRefreshing] = React.useState(false)
           const active = !!isActive(login)
           const reload = async () => {
             const value = await call({ action: 'list' })
@@ -146,9 +149,20 @@ window.__ModuleLoader__.load({
           })
           const openRenew = id => { setRenewId(id); setLogin(null); setAdding(true); setConfirmAll(false) }
           const count = accounts?.length ?? 0
+          const refreshAll = () => run(async () => {
+            setRefreshing(true)
+            let failure
+            try { await call({ action: 'refresh-models' }) } catch (e) { failure = e }
+            // Always reload: a failed refresh still needs to show the kept catalog.
+            try { await reload() } catch (e) { failure ??= e }
+            setRefreshing(false)
+            if (failure) throw failure
+          })
           return h('section', { className: 'csm' }, h('style', null, css), h('div', { className: 'csm-card' },
             h('div', { className: 'csm-header' }, h('h3', null, t('registered')),
               h('div', { className: 'csm-actions' },
+                h('button', { disabled: busy || active || !count || refreshing, 'aria-busy': refreshing, onClick: refreshAll },
+                  t(refreshing ? 'refreshingModels' : 'refreshModels')),
                 h('button', { disabled: busy || active, onClick: () => { setRenewId(null); setLogin(null); setAdding(true); setConfirmAll(false) } }, t('add')),
                 h('button', { disabled: busy || active || !count, onClick: () => { setConfirmAll(true); setAdding(false) } }, t('removeAll')))),
             error && h('p', { role: 'alert', className: 'csm-error' }, error),
@@ -247,7 +261,10 @@ window.__ModuleLoader__.load({
                 multiple && h('button', { className: 'csm-edit', 'aria-label': t('edit'), title: t('edit'), disabled, onClick: () => { setEditing(true); setConfirm(false) } }, h(EditIcon))),
               h('div', { className: 'csm-meta' },
                 h('span', { className: 'csm-status', title: t('statusHint') }, h('span', { className: `csm-dot${status === 'valid' ? '' : ' csm-dot-warn'}`, 'aria-hidden': true }), t(status)),
-                h('span', { className: 'csm-email' }, account.email || t('noEmail')))),
+                h('span', { className: 'csm-email' }, account.email || t('noEmail'))),
+              account.modelCatalog && h('div', { className: 'csm-meta', role: 'status' },
+                `${t({ builtin: 'catalogBuiltin', cached: 'catalogCached', online: 'catalogOnline' }[account.modelCatalog.source])} · ${account.modelCatalog.count} ${t('modelCount')}`,
+                account.modelCatalog.refresh === 'failed' && h('span', null, t('catalogFailed')))),
             h('div', { className: 'csm-actions' },
               status !== 'valid' && h('button', { disabled, onClick: () => openRenew(account.id) }, t('renew')),
               h('button', { disabled, onClick: () => { setConfirm(true); setEditing(false) } }, t('remove')))),

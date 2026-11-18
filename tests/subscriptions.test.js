@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Accounts, routeOf } from '../src/accounts.js'
 import { Subscriptions } from '../src/subscriptions.js'
 
-function fixture() {
+function fixture(options = {}) {
   const records = new Map()
   const credentials = {
     listRecords: async () => [...records.keys()].map(key => ({ key, kind: 'grant' })),
@@ -25,7 +25,7 @@ function fixture() {
     return dispose
   } }
   const subscriptions = new Subscriptions({ accounts, llm, adapterFactory: options => options,
-    authFactory: () => ({ getAuth() { throw new Error('Metadata operations must not resolve tokens or query quotas') } }) })
+    authFactory: () => ({ getAuth() { throw new Error('Metadata operations must not resolve tokens or query quotas') } }), ...options })
   const add = suffix => accounts.add(suffix, { type: 'oauth', accountId: suffix, access: 'synthetic-access', refresh: 'synthetic-refresh', expires: Date.now() + 3600000 })
   return { accounts, records, providers, subscriptions, add, updates }
 }
@@ -59,4 +59,48 @@ test('sign out all removes only this plugin’s records/routes and returns the s
   assert.deepEqual([...providers], [['openai-codex', 'original plugin']])
   assert.equal(subscriptions.routes.size, 0)
   subscriptions.dispose()
+})
+
+test('model refresh is account scoped and suppresses disposed notifications', async () => {
+  const catalogs = [], pruned = []
+  const f = fixture({
+    catalogFactory: options => {
+      let disposed = false, refreshed = false
+      const catalog = { options, disposed: () => disposed,
+        status: () => ({ source: refreshed ? 'online' : 'builtin', refresh: refreshed ? 'ok' : 'idle', count: 2 }),
+        async refresh() { refreshed = true; options.onUpdated() }, dispose() { disposed = true },
+      }
+      catalogs.push(catalog)
+      return catalog
+    },
+    pruneCatalogCache: async accounts => { pruned.push(accounts.map(a => a.id)) },
+  })
+  const a = await f.add('personal'), b = await f.add('work')
+  await f.subscriptions.sync()
+  const value = await f.subscriptions.manage({ action: 'refresh-models', id: a })
+  assert.equal(value.accounts.find(account => account.id === a).modelCatalog.source, 'online')
+  assert.equal(value.accounts.find(account => account.id === b).modelCatalog.source, 'builtin')
+  assert.deepEqual(f.updates, [[routeOf(a)]])
+  const own = catalogs.find(catalog => catalog.status().source === 'online')
+  await f.subscriptions.manage({ action: 'remove', id: a })
+  assert.equal(own.disposed(), true)
+  assert.deepEqual(pruned, [[b]])
+  const count = f.updates.length
+  own.options.onUpdated()
+  assert.equal(f.updates.length, count)
+  await assert.rejects(f.subscriptions.manage({ action: 'refresh-models', id: a }), /unavailable/)
+  f.subscriptions.dispose()
+  assert.ok(catalogs.every(catalog => catalog.disposed()))
+})
+
+test('failed refresh never exposes server or credential errors', async () => {
+  const f = fixture({ catalogFactory: () => ({ status: () => ({ source: 'builtin', refresh: 'failed', count: 1 }),
+    async refresh() { throw new Error('secret-token-and-server-body') }, dispose() {} }) })
+  await f.add('personal')
+  await assert.rejects(f.subscriptions.manage({ action: 'refresh-models' }), error => {
+    assert.match(error.message, /refresh failed/)
+    assert.ok(!error.message.includes('secret'))
+    return true
+  })
+  f.subscriptions.dispose()
 })
