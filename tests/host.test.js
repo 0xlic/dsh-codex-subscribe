@@ -6,7 +6,7 @@ import { Login } from '../src/login.js'
 import { createAccountAdapter } from '../src/adapter.js'
 
 test('host uses a composable exact authenticated route; UI and tool share management operations', async () => {
-  let route, tool
+  let route, tool, usage
   const effects = []
   const ctx = {
     credentials: { listRecords: async () => [], readRecord: async () => undefined, deleteRecord: async () => {} },
@@ -14,15 +14,19 @@ test('host uses a composable exact authenticated route; UI and tool share manage
     connection: { fetch: { register(value) { route = value; return async () => { route = undefined } } }, rpc: { intercept() { throw new Error('Core owns this interceptor') } } },
     tools: { register(value) { tool = value; return () => { tool = undefined } } },
     effect(fn) { effects.push(fn()) },
+    provide(name, value) { assert.equal(name, 'codexUsage'); usage = value; return () => { usage = undefined } },
   }
   await apply(ctx)
+  assert.deepEqual(Object.keys(usage).sort(), ['effectiveAccount', 'list', 'listResetCards', 'read', 'useResetCard', 'version'])
+  assert.deepEqual(await usage.list('codex-sub-00000000000000000000000000000000'), [])
   assert.equal(route.path, '/api/codex-subscribe/manage')
   assert.deepEqual(route.methods, ['POST'])
   const request = input => new Request('http://dsh.internal/api/codex-subscribe/manage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
   const rpc = payload => route.fetch(request({ type: 'client-request', rpcId: randomUUID(), method: 'codex-subscribe/manage', payload }))
   const result = await (await rpc({ action: 'list' })).json()
-  assert.deepEqual(result.result, { ok: true, value: { accounts: [] } })
-  assert.deepEqual(await tool.execute({ action: 'list' }), result.result.value)
+  assert.deepEqual(result.result, { ok: true, value: { accounts: [], chatFailover: false } })
+  assert.deepEqual(await tool.execute({ action: 'list' }), { accounts: [] })
+  await assert.rejects(tool.execute({ action: 'chat-failover-save', enabled: true }), /Unknown operation/)
   assert.equal((await route.fetch(request({ invalid: true }))).status, 400)
   const wrong = await route.fetch(request({ type: 'client-request', rpcId: randomUUID(), method: 'wrong', payload: {} }))
   assert.equal(wrong.status, 400)

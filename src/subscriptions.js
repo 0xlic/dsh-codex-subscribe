@@ -2,8 +2,8 @@ import { UserError, routeOf } from './accounts.js'
 
 /** Shared application operations for UI RPC and the management tool. */
 export class Subscriptions {
-  constructor({ accounts, llm, adapterFactory, authFactory, catalogFactory, pruneCatalogCache }) {
-    Object.assign(this, { accounts, llm, adapterFactory, authFactory, catalogFactory, pruneCatalogCache })
+  constructor({ accounts, llm, adapterFactory, authFactory, catalogFactory, pruneCatalogCache, chatRouter, onRemoved }) {
+    Object.assign(this, { accounts, llm, adapterFactory, authFactory, catalogFactory, pruneCatalogCache, chatRouter, onRemoved })
     this.routes = new Map()
     this.tail = Promise.resolve()
     this.disposed = false
@@ -23,7 +23,11 @@ export class Subscriptions {
       const keep = new Set(accounts.map(a => a.id))
       let removed = false
       for (const [id, current] of this.routes) {
-        if (!keep.has(id)) { current.catalog?.dispose(); current.dispose(); this.routes.delete(id); removed = true }
+        if (!keep.has(id)) {
+          current.catalog?.dispose(); current.dispose(); this.routes.delete(id)
+          this.onRemoved?.(id)
+          removed = true
+        }
       }
       for (const account of accounts) {
         const current = this.routes.get(account.id)
@@ -55,7 +59,9 @@ export class Subscriptions {
           label: () => entry.label.replace(/^codex(?=-|$)/, 'Codex'),
           getCredential,
           catalog: entry.catalog,
+          chatRouter: this.chatRouter,
         })
+        Object.assign(entry, { id: account.id, provider: account.provider, adapter, getCredential })
         entry.dispose = this.llm.registerAdapter([account.provider], adapter)
         this.routes.set(account.id, entry)
       }
@@ -63,6 +69,13 @@ export class Subscriptions {
         try { await this.pruneCatalogCache?.(accounts) } catch { /* Cache cleanup cannot undo account removal. */ }
       }
     })
+  }
+  async usageCredential(id, signal) {
+    const entry = this.routes.get(id)
+    if (this.disposed || !entry) throw new UserError('Subscription no longer exists')
+    const grant = await entry.getCredential({ signal })
+    if (this.disposed || this.routes.get(id) !== entry || !grant.accountId) throw new UserError('Subscription no longer exists')
+    return grant
   }
   async imageCredential(id, signal) {
     if (this.disposed) throw new UserError('Plugin is stopped')

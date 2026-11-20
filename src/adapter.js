@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
@@ -33,21 +34,57 @@ function nativeRequest(options, route) {
   }
 }
 
-async function* accountStream(stream, route) {
-  for await (const chunk of stream) {
-    if (chunk.type !== 'finish' || chunk.replayState === undefined) yield chunk
-    else yield { ...chunk, replayState: replayProvider(chunk.replayState, NATIVE_PROVIDER, route) }
+const quotaEvidence = new AsyncLocalStorage()
+
+function codexStreamOptions(options) {
+  const { temperature: _unsupported, ...supported } = options ?? {}
+  const evidence = quotaEvidence.getStore()
+  if (!evidence) return supported
+  const existing = supported.onProviderStreamEvent
+  return { ...supported, async onResponse(response, model) {
+    evidence.http429 = response.status === 429
+    await supported.onResponse?.(response, model)
+  }, async onProviderStreamEvent(event, model) {
+    const error = event?.type === 'response.failed' ? event.response?.error : event?.type === 'error' ? event.error ?? event : undefined
+    if (error?.code === 'usage_limit_reached' || error?.type === 'usage_limit_reached') evidence.exhausted = true
+    await existing?.(event, model)
+  } }
+}
+
+async function* accountStream(start, route, trackQuota = false) {
+  const evidence = trackQuota ? {} : undefined
+  const run = callback => evidence ? quotaEvidence.run(evidence, callback) : callback()
+  const iterator = run(() => start()[Symbol.asyncIterator]())
+  let done = false
+  try {
+    while (true) {
+      const next = await run(() => iterator.next())
+      if (next.done) { done = true; break }
+      const chunk = next.value
+      if (chunk.type !== 'finish') { yield chunk; continue }
+      if (evidence?.exhausted && chunk.reason?.kind === 'error') {
+        yield { type: 'finish', reason: { kind: 'error', failure: {
+          code: 'CODEX_SUBSCRIPTION_QUOTA_EXHAUSTED', message: 'Codex subscription quota is exhausted.',
+        } } }
+      } else if (evidence?.http429 && chunk.reason?.kind === 'error') {
+        yield { ...chunk, reason: { ...chunk.reason, failure: { ...chunk.reason.failure, status: 429 } } }
+      } else if (chunk.replayState === undefined) yield chunk
+      else yield { ...chunk, replayState: replayProvider(chunk.replayState, NATIVE_PROVIDER, route) }
+    }
+  } finally {
+    if (!done) await run(() => iterator.return?.())
   }
 }
 
 /** One instance per immutable account id, never a shared mutable active account. */
 class AccountAdapter extends LlmAdapter {
-  constructor(route, label, inner, catalog) {
+  constructor(route, label, inner, catalog, chatRouter) {
     super()
     this.route = route
     this.label = typeof label === 'function' ? label : () => label
     this.inner = inner
     this.catalog = catalog
+    this.chatRouter = chatRouter
   }
 
   assertRoute(provider) {
@@ -86,7 +123,7 @@ class AccountAdapter extends LlmAdapter {
     return { ...await this.inner.resolveModel(NATIVE_PROVIDER, model, signal), provider: this.route }
   }
 
-  async prepareCall(provider, model, signal) {
+  async prepareSingle(provider, model, signal) {
     this.assertRoute(provider)
     await this.catalog?.ready({ signal })
     const prepared = await this.inner.prepareCall(NATIVE_PROVIDER, model, signal)
@@ -94,15 +131,29 @@ class AccountAdapter extends LlmAdapter {
       model: { ...prepared.model, provider: this.route },
       stream: options => {
         this.assertRoute(options.provider)
-        return accountStream(prepared.stream(nativeRequest(options, this.route)), this.route)
+        return accountStream(() => prepared.stream(nativeRequest(options, this.route)), this.route,
+          !!this.chatRouter && !!options.sessionId && options.purpose === undefined)
       },
     }
   }
 
+  async prepareCall(provider, model, signal) {
+    const primary = await this.prepareSingle(provider, model, signal)
+    if (!this.chatRouter) return primary
+    return { ...primary, stream: options => {
+      this.assertRoute(options.provider)
+      return this.chatRouter(options, primary)
+    } }
+  }
+
   async *stream(options) {
     this.assertRoute(options.provider)
+    if (this.chatRouter && options.sessionId && options.purpose === undefined) {
+      yield* (await this.prepareCall(options.provider, options.model, options.signal)).stream(options)
+      return
+    }
     await this.catalog?.ready({ signal: options.signal })
-    yield* accountStream(this.inner.stream(nativeRequest(options, this.route)), this.route)
+    yield* accountStream(() => this.inner.stream(nativeRequest(options, this.route)), this.route)
   }
 }
 
@@ -117,6 +168,7 @@ export function createAccountAdapter({
   getCredential,
   resolveAttachments,
   catalog,
+  chatRouter,
   providerFactory = openaiCodexProvider,
   adapterFactory = config => new PiAiAdapter(config),
 }) {
@@ -125,18 +177,14 @@ export function createAccountAdapter({
   }
   if (typeof getCredential !== 'function') throw new TypeError('getCredential is required')
   const native = providerFactory()
-  const codexOptions = (options = {}) => {
-    // The Codex subscription endpoint rejects temperature (including the value
-    // used by generic DSH auxiliary calls such as auto-review).
-    const { temperature: _unsupported, ...supported } = options
-    return supported
-  }
+  // The Codex subscription endpoint rejects temperature (including the value
+  // used by generic DSH auxiliary calls such as auto-review).
   // A native OAuth-only provider ignores PiAiAdapter's apiKey override. Keep
   // native transport/models/OAuth intact and accept only the resolved token.
   const piProvider = {
     ...native,
-    stream: (model, context, options) => native.stream(model, context, codexOptions(options)),
-    streamSimple: (model, context, options) => native.streamSimple(model, context, codexOptions(options)),
+    stream: (model, context, options) => native.stream(model, context, codexStreamOptions(options)),
+    streamSimple: (model, context, options) => native.streamSimple(model, context, codexStreamOptions(options)),
     auth: {
       ...native.auth,
       apiKey: {
@@ -195,5 +243,5 @@ export function createAccountAdapter({
     auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
     resolveAttachments,
   })
-  return new AccountAdapter(route, label, inner, catalog)
+  return new AccountAdapter(route, label, inner, catalog, chatRouter)
 }

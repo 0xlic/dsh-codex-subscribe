@@ -102,6 +102,29 @@ test('native provider stream methods remove only unsupported temperature', () =>
   assert.equal(options.temperature, 0, 'caller options are immutable')
 })
 
+test('structured Codex quota evidence is request-scoped and never derives from message text', async () => {
+  const original = openaiCodexProvider(), model = original.getModels()[0]
+  const account = createAccountAdapter({ route, label: 'A', getCredential: async () => ({ type: 'oauth', access: 'test' }),
+    chatRouter: (options, primary) => primary.stream(options),
+    providerFactory: () => ({ ...original, async *streamSimple(requestModel, context, options) {
+      const event = context.messages.some(message => message.role === 'user' && message.content === 'verified')
+        ? { type: 'response.failed', response: { error: { code: 'usage_limit_reached' } } }
+        : { type: 'response.failed', response: { error: { code: 'rate_limit_exceeded' } } }
+      await options.onProviderStreamEvent?.(event, requestModel)
+      const message = { role: 'assistant', api: requestModel.api, provider: native, model: requestModel.id, content: [],
+        usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, stopReason: 'error',
+        errorMessage: 'You have hit your ChatGPT usage limit', timestamp: 0 }
+      yield { type: 'error', reason: 'error', error: message }
+    } }),
+  })
+  const prepared = await account.prepareCall(route, model.id)
+  const run = text => collect(prepared.stream({ provider: route, model: model.id, sessionId: text,
+    messages: [{ role: 'user', content: [{ type: 'text', text }] }] }))
+  const [verified, ambiguous] = await Promise.all([run('verified'), run('ambiguous')])
+  assert.equal(verified.at(-1).reason.failure.code, 'CODEX_SUBSCRIPTION_QUOTA_EXHAUSTED')
+  assert.notEqual(ambiguous.at(-1).reason.failure.code, 'CODEX_SUBSCRIPTION_QUOTA_EXHAUSTED')
+})
+
 test('real PiAiAdapter resolves native Codex models and authenticates a local stub stream', async () => {
   let captured
   const original = openaiCodexProvider()

@@ -18,6 +18,10 @@ function fixture({ language = 'en', account = baseAccount, handler } = {}) {
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(value => value !== false && value != null) }),
     Fragment: 'fragment', useSyncExternalStore() {},
+    useRef(initial) {
+      const owner = current, index = owner.cursor++
+      return owner.state[index] ??= { current: initial }
+    },
     useState(initial) {
       const owner = current, index = owner.cursor++
       if (!(index in owner.state)) owner.state[index] = typeof initial === 'function' ? initial() : initial
@@ -142,6 +146,25 @@ for (const language of ['en', 'zh']) {
     f.dispose()
   })
 }
+
+test('conversation quota failover is saved through a user-only switch and a failed save leaves it unchanged', async () => {
+  let permit = false
+  const f = fixture({ handler: input => {
+    if (input.action === 'list') return { ok: true, value: { accounts: [baseAccount], chatFailover: false } }
+    assert.deepEqual(JSON.parse(JSON.stringify(input)), { action: 'chat-failover-save', enabled: true })
+    return permit ? { ok: true, value: { chatFailover: true } } : { ok: false, error: { message: 'Save denied' } }
+  } })
+  const toggle = () => nodes(f.render().section).find(node => node.props.role === 'switch')
+  f.render(); await flush()
+  assert.equal(toggle().props['aria-checked'], false)
+  await toggle().props.onClick()
+  assert.equal(toggle().props['aria-checked'], false)
+  assert.ok(nodes(f.render().section).some(node => node.props.role === 'alert' && text(node) === 'Save denied'))
+  permit = true
+  await toggle().props.onClick()
+  assert.equal(toggle().props['aria-checked'], true)
+  f.dispose()
+})
 
 test('active sign-in and an empty account list disable the shared refresh action', async () => {
   const signingIn = fixture({ handler: () => ({ ok: true, value: { accounts: [baseAccount], login: { id: 'login-one', phase: 'waiting_browser' } } }) })

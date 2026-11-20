@@ -72,7 +72,7 @@ export class Login {
       publish({ phase: 'finalizing', prompt: undefined, authUrl: undefined, userCode: undefined })
       const id = renewId ?? await this.accounts.add(label, credential, controller.signal)
       if (renewId) await this.accounts.renew(id, credential, controller.signal)
-      await this.changed()
+      await this.changed({ id, renewed: !!renewId })
       publish({ phase: 'authenticated', providerId: id, prompt: undefined, authUrl: undefined, userCode: undefined })
     }).catch(error => {
       if (controller.signal.aborted) return

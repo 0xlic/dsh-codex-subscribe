@@ -10,6 +10,7 @@ export const IMAGE_MODELS = Object.freeze({
 })
 export const IMAGE_DEFAULTS = Object.freeze({ enabled: false, model: 'gpt-image-2', quality: 'auto', accountId: '' })
 export const Config = z.object({
+  chatFailover: z.boolean().default(false),
   images: z.object({
     enabled: z.boolean().default(false),
     model: z.union(Object.keys(IMAGE_MODELS)).default(IMAGE_DEFAULTS.model),

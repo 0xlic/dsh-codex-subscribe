@@ -11,6 +11,7 @@ window.__ModuleLoader__.load({
         title: 'Codex subscriptions', registered: 'Registered accounts', add: 'Add account', removeAll: 'Sign out all accounts',
         browser: 'Browser sign-in', device: 'Device code sign-in', empty: 'No registered accounts', loading: 'Loading…',
         edit: 'Edit suffix', suffix: 'Account suffix', save: 'Save', remove: 'Remove', renew: 'Sign in again', cancel: 'Cancel',
+        chatFailover: 'Switch accounts when Codex quota is exhausted', chatFailoverHint: 'After another signed-in account successfully answers with the same model, it becomes the selected account for this conversation. Reset cards are never used automatically.',
         images: 'Image generation', imagesEnable: 'Enable image generation', imagesHint: 'Changes are saved and applied automatically. The 2.5 models are experimental; availability depends on your subscription.',
         imagesModel: 'Image model', imagesQuality: 'Quality', imagesAccount: 'Account', imagesAuto: 'Automatic',
         imagesMissingAccount: 'Selected account is no longer registered', imagesSaving: 'Applying…', imagesSaved: 'Image settings applied.', retry: 'Retry',
@@ -28,6 +29,7 @@ window.__ModuleLoader__.load({
         title: 'Codex 订阅', registered: '已登录账号', add: '添加账号', removeAll: '退出全部账号',
         browser: '浏览器登录', device: '设备代码登录', empty: '暂无已登录账号', loading: '加载中…',
         edit: '修改后缀', suffix: '账号后缀', save: '保存', remove: '移除', renew: '重新登录', cancel: '取消',
+        chatFailover: 'Codex 额度不足时自动换号', chatFailoverHint: '另一个已登录账号用同一模型成功响应后，会成为本会话所选账号。不会自动使用重置卡。',
         images: '图像生成', imagesEnable: '启用图像生成', imagesHint: '修改后自动保存并生效。2.5 模型为实验选项，能否使用取决于订阅权限。',
         imagesModel: '图像模型', imagesQuality: '质量', imagesAccount: '账号', imagesAuto: '自动选择',
         imagesMissingAccount: '所选账号已不再登录', imagesSaving: '正在应用…', imagesSaved: '图像设置已生效。', retry: '重试',
@@ -105,16 +107,22 @@ window.__ModuleLoader__.load({
           const [busy, setBusy] = React.useState(false)
           const [confirmAll, setConfirmAll] = React.useState(false)
           const [refreshing, setRefreshing] = React.useState(false)
+          const [chatFailover, setChatFailover] = React.useState(null)
+          const chatSaving = React.useRef(false)
           const active = !!isActive(login)
           const reload = async () => {
             const value = await call({ action: 'list' })
             setAccounts(value.accounts)
             setLogin(value.login ?? null)
+            setChatFailover(typeof value.chatFailover === 'boolean' ? value.chatFailover : null)
           }
           React.useEffect(() => {
             let stopped = false
             const load = () => call({ action: 'list' }).then(value => {
-              if (!stopped) { setAccounts(value.accounts); setLogin(value.login ?? null) }
+              if (!stopped) {
+                setAccounts(value.accounts); setLogin(value.login ?? null)
+                if (!chatSaving.current) setChatFailover(typeof value.chatFailover === 'boolean' ? value.chatFailover : null)
+              }
             }).catch(e => { if (!stopped) setError(e.message) })
             void load()
             window.addEventListener('focus', load)
@@ -183,6 +191,17 @@ window.__ModuleLoader__.load({
                 h('input', { className: 'csm-response', 'aria-label': t('answer'), type: 'password', value: answer, autoComplete: 'off', onChange: e => setAnswer(e.target.value) }),
                 h('button', { disabled: busy || !answer.trim(), onClick: () => run(async () => { setLogin(await call({ action: 'login-submit', id: login.id, value: answer })); setAnswer('') }) }, t('submit')))),
               h('button', { disabled: busy || login.phase === 'finalizing', onClick: () => run(async () => { if (active) await call({ action: 'login-cancel', id: login.id }); setLogin(null); setRenewId(null); setAnswer('') }) }, t('cancel')))),
+            chatFailover !== null && h('section', { className: 'csm-card csm-images', 'aria-label': t('chatFailover') },
+              h('div', { className: 'csm-images-heading' }, h('h3', null, t('chatFailover')),
+                h('button', { type: 'button', className: 'csm-switch', role: 'switch', 'aria-label': t('chatFailover'),
+                  'aria-checked': chatFailover, disabled: busy || active, onClick: () => {
+                    if (chatSaving.current) return
+                    chatSaving.current = true
+                    return run(async () => {
+                      try { setChatFailover((await call({ action: 'chat-failover-save', enabled: !chatFailover })).chatFailover) }
+                      finally { chatSaving.current = false }
+                    })
+                  } }, h('span', { 'aria-hidden': true }))), h('p', null, t('chatFailoverHint'))),
             h(ImageSettings, { accounts, t }))
         }
         function ImageSettings({ accounts, t }) {

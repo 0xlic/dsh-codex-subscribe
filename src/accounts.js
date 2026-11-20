@@ -174,6 +174,15 @@ export class Accounts {
   async remove(id) {
     await this.credentials.deleteRecord(this.keyOf(validateId(id)))
   }
+  // Allow an owner operation to start a request while replacement/sign-out
+  // is excluded. The callback must not await the upstream request under the lock.
+  async withCredentialLock(id, dispatch) {
+    await this.credentials.modifyRecord(this.keyOf(validateId(id)), current => {
+      if (!current) throw new UserError('Subscription no longer exists')
+      dispatch(structuredClone(payload(current).credential))
+      return undefined
+    })
+  }
   store(id) {
     const key = this.keyOf(validateId(id))
     const assertProvider = provider => { if (provider !== NATIVE_PROVIDER) throw new UserError('Unknown credential provider') }
