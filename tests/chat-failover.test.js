@@ -166,27 +166,35 @@ test('suspected generic 429 fails over only with fresh quota corroboration for t
   assert.equal(foreign.calls.prepare.length, 0)
 })
 
-test('after-output failures suppress outer retry even on the untouched primary route', async () => {
-  const thrown = Object.assign(new Error('mid-stream transport'), { code: 'RATE_LIMIT' })
+test('a thrown transport failure after output reaches native recovery unchanged', async () => {
+  const thrown = Object.assign(new Error('mid-stream transport'), { code: 'TRANSPORT' })
   const f = fixture({ primarySpecs: { [PRIMARY]: [[text('partial'), { $throw: thrown }]] } })
-  const seen = []
   const { chunks, error } = await rejectionWithChunks(f.run())
-  assert.ok(error instanceof ChatFailoverError)
-  assert.equal(error.code, CHAT_FAILOVER_NO_RETRY)
-  assert.equal(error.noRetry, true)
-  assert.equal(error.cause, thrown)
-  assert.deepEqual(chunks.map(chunk => chunk.type), ['text-delta'])
+  assert.equal(error, thrown)
+  assert.deepEqual(chunks, [text('partial')])
   assert.equal(f.calls.prepare.length, 0)
 })
 
-test('a post-commit error finish suppresses outer retry and never records success', async () => {
-  const failure = { message: 'SECRET body detail', code: 'QUOTA' }
-  const f = fixture({ primarySpecs: { [PRIMARY]: [[text('partial'), finish('error', { failure })]] } })
+test('a transient finish after output preserves native code and Retry-After on either account', async () => {
+  const terminal = finish('error', { failure: { message: 'temporary failure', code: 'SERVER', status: 503, providerRetryAfterMs: 800 } })
+  const primary = fixture({ primarySpecs: { [PRIMARY]: [[text('partial'), terminal]] } })
+  const backup = fixture({ primarySpecs: { [PRIMARY]: [[{ $throw: proofError() }]] }, specs: { [B]: [[text('partial'), terminal]] } })
+  for (const f of [primary, backup]) {
+    assert.deepEqual(await collect(f.run()), [text('partial'), terminal])
+    assert.equal(f.calls.events.some(event => event.type === 'success'), false)
+    assert.equal(f.chatRouter.effectiveAccount({ sessionId: SESSION, provider: PRIMARY, model: MODEL, reasoningEffort: 'high' }), undefined)
+  }
+  assert.deepEqual(primary.calls.streams, [])
+  assert.deepEqual(backup.calls.streams.map(entry => entry.provider), [B])
+})
+
+test('verified quota exhaustion after output neither hops nor reports success', async () => {
+  const f = fixture({ primarySpecs: { [PRIMARY]: [[text('partial'), finish('error', { failure: { message: 'quota', code: QUOTA_PROOF_CODE } })]] } })
   const chunks = await collect(f.run())
   assert.deepEqual(chunks[0], text('partial'))
   assert.equal(chunks[1].reason.failure.code, CHAT_FAILOVER_NO_RETRY)
   assert.equal(f.calls.prepare.length, 0)
-  assert.equal(f.chatRouter.effectiveAccount({ sessionId: SESSION, provider: PRIMARY, model: MODEL, reasoningEffort: 'high' }), undefined)
+  assert.equal(f.calls.events.some(event => event.type === 'success'), false)
 })
 
 test('a pre-commit error finish chunk carries reason.failure into classification', async () => {
@@ -217,17 +225,14 @@ test('non-quota pre-output primary failure is preserved raw for outer retry norm
   assert.equal(f.calls.prepare.length, 0)
 })
 
-test('non-quota failure on a routed account is terminal no-retry, never a silent second hop', async () => {
-  const thrown = Object.assign(new Error('remote rejected'), { code: 'AUTH_FAILED' })
+test('a thrown failure on a backup is preserved without hopping again', async () => {
+  const thrown = Object.assign(new Error('remote timeout'), { code: 'TIMEOUT' })
   const f = fixture({
     primarySpecs: { [PRIMARY]: [[{ $throw: proofError() }]] },
     specs: { [B]: [[{ $throw: thrown }]] },
   })
-  const error = await rejection(f.run())
-  assert.ok(error instanceof ChatFailoverError)
-  assert.equal(error.code, CHAT_FAILOVER_NO_RETRY)
-  assert.equal(error.cause, thrown)
-  assert.equal(f.calls.streams.map(entry => entry.provider).includes(C), false)
+  assert.equal(await rejection(f.run()), thrown)
+  assert.deepEqual(f.calls.streams.map(entry => entry.provider), [B])
 })
 
 test('fresh-cached exhausted alternatives are skipped without any request; verified exhaustion everywhere is terminal', async () => {

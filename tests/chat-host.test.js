@@ -111,6 +111,19 @@ test('Host preserves single dispatch after partial output and does not confuse g
   assert.deepEqual(f.calls.filter(([path]) => path.endsWith('/responses')).map(([, account]) => account), ['primary', 'primary'])
 })
 
+test('Host preserves a retryable finish after the Codex adapter has streamed text', async t => {
+  const f = await setup(t, account => {
+    assert.equal(account, 'primary')
+    return sse(textStart, text, { type: 'error', code: 'server_error', message: 'Connection timed out' })
+  }, 5, true)
+  const chunks = await f.request('transient')
+  assert.equal(chunks.some(chunk => chunk.type === 'text-delta'), true)
+  assert.equal(chunks.at(-1).reason.kind, 'error')
+  assert.equal(chunks.at(-1).reason.failure.code, 'TIMEOUT')
+  assert.equal(f.selections.length, 0)
+  assert.deepEqual(f.calls.filter(([path]) => path.endsWith('/responses')).map(([, account]) => account), ['primary'])
+})
+
 test('a real HTTP usage failure is corroborated against the weekly-only limit before changing accounts', async t => {
   const f = await setup(t, account => account === 'primary'
     ? Response.json({ error: { code: 'usage_limit_reached', message: 'Synthetic exhausted quota' } }, { status: 429 })

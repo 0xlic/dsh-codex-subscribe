@@ -8,7 +8,7 @@ import { prepareChatAccount } from './chat-account.js'
 export const QUOTA_PROOF_CODE = 'CODEX_SUBSCRIPTION_QUOTA_EXHAUSTED'
 /** Terminal wrap code: verified quota exhaustion left no retryable route. */
 export const CHAT_FAILOVER_QUOTA_EXHAUSTED = 'CHAT_FAILOVER_QUOTA_EXHAUSTED'
-/** Terminal wrap code: retry suppressed (output already streamed, or non-quota failure after routing). */
+/** Terminal wrap code: verified quota exhaustion arrived after output started. */
 export const CHAT_FAILOVER_NO_RETRY = 'CHAT_FAILOVER_NO_RETRY'
 /** DSH content chunk types; the first of these commits an attempt. */
 export const CONTENT_CHUNK_TYPES = ['block-start', 'text-delta', 'reasoning-delta', 'tool-call-delta', 'block-end']
@@ -317,33 +317,28 @@ export function createChatRouter({
       const buffered = []
       let failure = null
       let inBand = null
-      let endedInBand = false
       let finishedSuccessfully = false
       try {
         // The fallback stream keeps the original request signal; the deadline guard never reaches it.
         const attemptStream = item.primary ? primary.stream(options) : callable(signal)
         for await (const chunk of attemptStream) {
-          if (committed) {
-            if (chunk?.type === 'finish') finishedSuccessfully = ['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason?.kind)
-            // Never hand the outer retry layer a retryable code after output.
-            if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') {
-              yield { type: 'finish', reason: { kind: 'error', failure: {
-                code: CHAT_FAILOVER_NO_RETRY,
-                message: 'Codex response failed after output started; not retried to avoid duplicate output.',
-              } } }
+          if (chunk?.type === 'finish') {
+            if (chunk.reason?.kind === 'aborted') {
+              yield chunk
               return
             }
+            if (chunk.reason?.kind === 'error') {
+              // Keep the original finish for native request recovery.
+              failure = finishFailure(chunk.reason)
+              inBand = chunk
+              break
+            }
+            finishedSuccessfully = ['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason?.kind)
+          }
+          if (committed) {
             yield chunk
-            if (chunk?.type === 'finish' && chunk.reason?.kind === 'aborted') endedInBand = true
             continue
           }
-          if (chunk?.type === 'finish' && (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted')) {
-            // Terminal chunks carry the machine fact in reason.failure (plain object or Error); classify that exact fact.
-            failure = finishFailure(chunk.reason)
-            inBand = chunk
-            break
-          }
-          if (chunk?.type === 'finish') finishedSuccessfully = ['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason?.kind)
           if (content.has(chunk?.type)) {
             committed = true
             for (const metadata of buffered) yield metadata // preserve original order
@@ -365,7 +360,6 @@ export function createChatRouter({
       if (failure !== null && isAbortFailure(failure, signal)) throw failure
 
       if (failure === null) {
-        if (endedInBand) return // surfaced verbatim after commit: neither a success nor a failover candidate
         if (committed) {
           if (item.primary) sessionMemory.forget?.(triple) // the dispatched route recovered; drop stale stickiness
           else if (finishedSuccessfully && !disposed && !signal?.aborted) {
@@ -384,13 +378,6 @@ export function createChatRouter({
       lastInBand = inBand
       signal?.throwIfAborted()
 
-      // After any committed output a restart would duplicate tool/text/reasoning: suppress outer retry.
-      if (committed) {
-        const error = new ChatFailoverError(`Subscription response failed after output started; retry suppressed to avoid duplicate output (route ${item.provider}, attempt ${attemptsUsed})`, CHAT_FAILOVER_NO_RETRY, { cause: failure })
-        emit({ type: 'terminal', sessionId: options.sessionId, code: error.code, attempts: attemptsUsed, output: true })
-        throw error
-      }
-
       const verdict = classifyChatQuotaFailure(failure, { proofCodes, suspectCodes })
       let verified = verdict === 'proven'
       if (!verified && verdict === 'suspected') {
@@ -399,19 +386,24 @@ export function createChatRouter({
         signal?.throwIfAborted()
       }
       if (!verified) {
+        // No account hop for ordinary errors. DSH settles the failed attempt
+        // and applies its native retry policy even if partial output was shown.
+        emit({ type: 'raw', sessionId: options.sessionId, code: failure?.code, attempts: attemptsUsed })
         if (inBand !== null) {
-          // In-band terminal failures keep the provider's own finish as the raw surface: pass it through verbatim for outer retry normalization.
-          emit({ type: 'raw', sessionId: options.sessionId, code: failure?.code, attempts: attemptsUsed })
-          yield inBand
+          yield inBand // preserve the original failure code and Retry-After
           return
         }
-        if (item.primary && attemptsUsed === 1) {
-          emit({ type: 'raw', sessionId: options.sessionId, code: failure?.code, attempts: attemptsUsed })
-          throw failure // preserve the raw primary failure for outer retry normalization
+        throw failure // the outer LLM adapter boundary normalizes thrown errors
+      }
+      if (committed) {
+        // Proven exhaustion may trigger a hop only before output is committed.
+        const message = 'Codex quota was exhausted after output started; no account switch was attempted for this request.'
+        emit({ type: 'terminal', sessionId: options.sessionId, code: CHAT_FAILOVER_NO_RETRY, attempts: attemptsUsed, output: true })
+        if (inBand !== null) {
+          yield { type: 'finish', reason: { kind: 'error', failure: { code: CHAT_FAILOVER_NO_RETRY, message } } }
+          return
         }
-        const error = new ChatFailoverError(`Subscription account failover stopped after ${attemptsUsed} attempts (${String(failure?.code ?? 'unknown')} on ${item.provider}); not retried automatically`, CHAT_FAILOVER_NO_RETRY, { cause: failure })
-        emit({ type: 'terminal', sessionId: options.sessionId, code: error.code, attempts: attemptsUsed, output: false })
-        throw error
+        throw new ChatFailoverError(message, CHAT_FAILOVER_NO_RETRY, { cause: failure })
       }
       if (item.sticky) sessionMemory.forget?.(triple) // stickiness pointed at an exhausted account
     }
