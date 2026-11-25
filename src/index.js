@@ -15,6 +15,7 @@ import { openModelCatalogStore } from './model-catalog-store.js'
 import { createCodexUsage } from './codex-usage.js'
 import { prepareChatAccount } from './chat-account.js'
 import { createChatRouter } from './chat-failover.js'
+import { createCodexSearchPreference, installCodexSearchPreference } from './web-search-routing.js'
 export { Config }
 
 export const name = 'codex-subscribe'
@@ -127,6 +128,22 @@ export async function apply(ctx, config = {}) {
   } })
   ctx.effect(() => () => { login.dispose(); subscriptions.dispose() })
   await subscriptions.sync()
+  const codexLiveSearch = () => (config.codexLiveSearch?.get?.() ?? config.codexLiveSearch) !== false
+  let liveSearchInstalled = false
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['web'], scoped => scoped.effect(() => {
+      const web = scoped.web
+      let active = true
+      const provider = createCodexSearchPreference({ web, subscriptions, accounts,
+        getInitiator: () => ctx.get('agents')?.currentInitiator?.(),
+        isActive: () => active && !stopped && codexLiveSearch(),
+      })
+      const dispose = installCodexSearchPreference(web, provider, codexLiveSearch)
+      if (!dispose) return undefined
+      liveSearchInstalled = true
+      return () => { active = false; liveSearchInstalled = false; dispose() }
+    }))
+  }
   // Expose only sanitized operations, not the owner object or its credential access.
   if (typeof ctx.provide === 'function') ctx.effect(() => ctx.provide('codexUsage', {
     version: 1,
@@ -145,15 +162,15 @@ export async function apply(ctx, config = {}) {
     },
   }))
   const imageSettings = imageSettingsOperations(ctx, settings, accounts)
-  async function saveChatFailover(enabled) {
-    if (typeof enabled !== 'boolean') throw new UserError('Invalid account failover setting')
+  async function saveSwitch(field, description, enabled) {
+    if (typeof enabled !== 'boolean') throw new UserError(`Invalid ${description} setting`)
     if (login.session && !['authenticated', 'failed', 'cancelled'].includes(login.session.view.phase)) throw new UserError('Finish or cancel sign-in before saving settings')
     const editor = ctx.get?.('configEditor')
     const entry = ctx.fiber?.entry
-    if (!editor || !entry) throw new UserError('Account failover settings cannot be saved in this profile')
-    try { await editor.edit(entry, current => ({ ...current, chatFailover: enabled })) }
-    catch { throw new UserError('Account failover settings could not be saved or applied') }
-    return { chatFailover: enabled }
+    if (!editor || !entry) throw new UserError(`${description} settings cannot be saved in this profile`)
+    try { await editor.edit(entry, current => ({ ...current, [field]: enabled })) }
+    catch { throw new UserError(`${description} settings could not be saved or applied`) }
+    return { [field]: enabled }
   }
   if (settings.enabled) {
     const accountMemory = await openImageAccountMemory(ctx.storageDomain)
@@ -199,10 +216,14 @@ export async function apply(ctx, config = {}) {
         if (login.session && !['authenticated', 'failed', 'cancelled'].includes(login.session.view.phase)) throw new UserError('Finish or cancel sign-in before saving image settings')
         return imageSettings.save(input.settings)
       }
-      case 'chat-failover-save': return saveChatFailover(input.enabled)
+      case 'chat-failover-save': return saveSwitch('chatFailover', 'Account failover', input.enabled)
+      case 'codex-live-search-save': {
+        return { ...await saveSwitch('codexLiveSearch', 'Codex Live search', input.enabled), codexLiveSearchAvailable: liveSearchInstalled }
+      }
       case 'list': {
         await subscriptions.sync()
         return { ...await subscriptions.manage(input), chatFailover: config.chatFailover === true,
+          codexLiveSearch: codexLiveSearch(), codexLiveSearchAvailable: liveSearchInstalled,
           ...(login.session ? { login: login.read(login.session.view.id) } : {}) }
       }
       case 'login': return login.start(input)

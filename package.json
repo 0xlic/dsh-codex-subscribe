@@ -27,8 +27,9 @@
     "@deepseek-ai/dsh-credentials": "0.2.2-rc.1",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
     "@deepseek-ai/dsh-llm-pi-ai": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-web": "0.2.2-rc.1",
     "@earendil-works/pi-ai": "1.3.0"
   },
-  "scripts": { "test:catalog-runtime": "ELECTRON_RUN_AS_NODE=1 \"$DSH_NODE_EXECUTABLE\" tests/catalog-runtime.cjs", "test:storage-runtime": "ELECTRON_RUN_AS_NODE=1 \"$DSH_NODE_EXECUTABLE\" tests/storage-domain-runtime.cjs", "test": "node --test tests/*.test.js", "check": "node --check src/index.js && node --check src/adapter.js && node --check src/subscriptions.js && node --check src/chat-account.js && node --check src/chat-failover.js && node --check src/codex-usage.js && node --check src/usage-cache.js && node --check src/model-catalog.js && node --check src/model-catalog-store.js && node --check src/images.js && node --check src/image-export.js && node --check src/image-settings.js && node --check src/image-accounts.js && node --check client.js && node --test tests/*.test.js" },
+  "scripts": { "test:catalog-runtime": "ELECTRON_RUN_AS_NODE=1 \"$DSH_NODE_EXECUTABLE\" tests/catalog-runtime.cjs", "test:storage-runtime": "ELECTRON_RUN_AS_NODE=1 \"$DSH_NODE_EXECUTABLE\" tests/storage-domain-runtime.cjs", "test:web-runtime": "ELECTRON_RUN_AS_NODE=1 \"$DSH_NODE_EXECUTABLE\" tests/web-search-runtime.cjs", "test": "node --test tests/*.test.js", "check": "node --check src/index.js && node --check src/adapter.js && node --check src/subscriptions.js && node --check src/chat-account.js && node --check src/chat-failover.js && node --check src/codex-usage.js && node --check src/usage-cache.js && node --check src/model-catalog.js && node --check src/model-catalog-store.js && node --check src/images.js && node --check src/image-export.js && node --check src/image-settings.js && node --check src/image-accounts.js && node --check client.js && node --test tests/*.test.js" },
   "devDependencies": { "@earendil-works/pi-ai": "1.3.0" }
 }

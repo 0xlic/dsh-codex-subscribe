@@ -12,6 +12,9 @@ window.__ModuleLoader__.load({
         browser: 'Browser sign-in', device: 'Device code sign-in', empty: 'No registered accounts', loading: 'Loading…',
         edit: 'Edit suffix', suffix: 'Account suffix', save: 'Save', remove: 'Remove', renew: 'Sign in again', cancel: 'Cancel',
         chatFailover: 'Switch accounts when Codex quota is exhausted', chatFailoverHint: 'After another signed-in account successfully answers with the same model, it becomes the selected account for this conversation. Reset cards are never used automatically.',
+        codexLiveSearch: 'Prefer Codex live search',
+        codexLiveSearchHint: 'Only applies to Codex models from this plugin when native Web search is set to Automatic. Explicit native Web search settings take precedence. Turning this off keeps native search rules. DeepSeek and page fetch are unchanged.',
+        codexLiveSearchUnavailable: 'Codex live search is not supported by this version of Harness. You can still save your preference.',
         fast: 'Fast mode', fastHint: 'Prioritize Codex requests. Fast mode may use more subscription quota.', fastFailed: 'Could not change Fast mode.', fastReadFailed: 'Could not load Fast mode.',
         images: 'Image generation', imagesEnable: 'Enable image generation', imagesHint: 'Changes are saved and applied automatically. The 2.5 models are experimental; availability depends on your subscription.',
         imagesModel: 'Image model', imagesQuality: 'Quality', imagesAccount: 'Account', imagesAuto: 'Automatic',
@@ -31,6 +34,9 @@ window.__ModuleLoader__.load({
         browser: '浏览器登录', device: '设备代码登录', empty: '暂无已登录账号', loading: '加载中…',
         edit: '修改后缀', suffix: '账号后缀', save: '保存', remove: '移除', renew: '重新登录', cancel: '取消',
         chatFailover: 'Codex 额度不足时自动换号', chatFailoverHint: '另一个已登录账号用同一模型成功响应后，会成为本会话所选账号。不会自动使用重置卡。',
+        codexLiveSearch: '优先使用 Codex Live 搜索',
+        codexLiveSearchHint: '仅在原生「网页搜索」设为「自动」时，适用于本插件提供的 Codex 模型。手动指定的原生网页搜索设置优先。关闭后仍按原生搜索规则运行，不影响 DeepSeek 或网页抓取。',
+        codexLiveSearchUnavailable: '当前版本的 Harness 不支持 Codex 实时搜索，但仍可保存此偏好。',
         fast: 'Fast 模式', fastHint: '优先处理 Codex 请求，可能消耗更多订阅额度。', fastFailed: '无法更改 Fast 模式。', fastReadFailed: '无法读取 Fast 模式。',
         images: '图像生成', imagesEnable: '启用图像生成', imagesHint: '修改后自动保存并生效。2.5 模型为实验选项，能否使用取决于订阅权限。',
         imagesModel: '图像模型', imagesQuality: '质量', imagesAccount: '账号', imagesAuto: '自动选择',
@@ -191,21 +197,37 @@ window.__ModuleLoader__.load({
           const [refreshing, setRefreshing] = React.useState(false)
           const [chatFailover, setChatFailover] = React.useState(null)
           const chatSaving = React.useRef(false)
+          const [liveSearch, setLiveSearch] = React.useState(null)
+          const [liveAvailable, setLiveAvailable] = React.useState(true)
+          const [livePending, setLivePending] = React.useState(false)
+          const [liveError, setLiveError] = React.useState('')
+          const liveSave = React.useRef({ pending: false, revision: 0 })
+          const syncLive = (value, revision) => {
+            if (liveSave.current.pending || revision !== liveSave.current.revision) return
+            setLiveSearch(typeof value.codexLiveSearch === 'boolean' ? value.codexLiveSearch : null)
+            setLiveAvailable(value.codexLiveSearchAvailable !== false)
+          }
           const active = !!isActive(login)
           const reload = async () => {
+            const revision = liveSave.current.revision
             const value = await call({ action: 'list' })
+            syncLive(value, revision)
             setAccounts(value.accounts)
             setLogin(value.login ?? null)
             setChatFailover(typeof value.chatFailover === 'boolean' ? value.chatFailover : null)
           }
           React.useEffect(() => {
             let stopped = false
-            const load = () => call({ action: 'list' }).then(value => {
-              if (!stopped) {
-                setAccounts(value.accounts); setLogin(value.login ?? null)
-                if (!chatSaving.current) setChatFailover(typeof value.chatFailover === 'boolean' ? value.chatFailover : null)
-              }
-            }).catch(e => { if (!stopped) setError(e.message) })
+            const load = () => {
+              const revision = liveSave.current.revision
+              return call({ action: 'list' }).then(value => {
+                if (!stopped) {
+                  setAccounts(value.accounts); setLogin(value.login ?? null)
+                  if (!chatSaving.current) setChatFailover(typeof value.chatFailover === 'boolean' ? value.chatFailover : null)
+                  syncLive(value, revision)
+                }
+              }).catch(e => { if (!stopped) setError(e.message) })
+            }
             void load()
             window.addEventListener('focus', load)
             return () => { stopped = true; window.removeEventListener('focus', load) }
@@ -238,6 +260,19 @@ window.__ModuleLoader__.load({
             setAdding(false)
           })
           const openRenew = id => { setRenewId(id); setLogin(null); setAdding(true); setConfirmAll(false) }
+          const saveLiveSearch = async () => {
+            if (busy || active || liveSave.current.pending || liveSearch === null) return
+            liveSave.current.pending = true
+            ++liveSave.current.revision
+            setLivePending(true); setLiveError('')
+            try {
+              const value = await call({ action: 'codex-live-search-save', enabled: !liveSearch })
+              if (typeof value?.codexLiveSearch !== 'boolean') throw new Error(t('error'))
+              setLiveSearch(value.codexLiveSearch)
+              if (typeof value.codexLiveSearchAvailable === 'boolean') setLiveAvailable(value.codexLiveSearchAvailable)
+            } catch (e) { setLiveError(e.message || t('error')) }
+            finally { liveSave.current.pending = false; setLivePending(false) }
+          }
           const count = accounts?.length ?? 0
           const refreshAll = () => run(async () => {
             setRefreshing(true)
@@ -284,6 +319,16 @@ window.__ModuleLoader__.load({
                       finally { chatSaving.current = false }
                     })
                   } }, h('span', { 'aria-hidden': true }))), h('p', null, t('chatFailoverHint'))),
+            liveSearch !== null && h('section', { className: 'csm-card csm-images', 'aria-label': t('codexLiveSearch') },
+              h('div', { className: 'csm-images-heading' }, h('h3', null, t('codexLiveSearch')),
+                h('button', { type: 'button', className: 'csm-switch', role: 'switch', 'aria-label': t('codexLiveSearch'),
+                  'aria-description': liveAvailable ? t('codexLiveSearchHint') : `${t('codexLiveSearchHint')} ${t('codexLiveSearchUnavailable')}`,
+                  'aria-checked': liveSearch, 'aria-busy': livePending, 'aria-disabled': busy || active || livePending,
+                  disabled: busy || active, onClick: saveLiveSearch }, h('span', { 'aria-hidden': true }))),
+              h('p', null, t('codexLiveSearchHint')),
+              !liveAvailable && h('p', null, t('codexLiveSearchUnavailable')),
+              livePending && h('p', { role: 'status' }, t('imagesSaving')),
+              liveError && h('p', { role: 'alert', className: 'csm-error' }, liveError)),
             h(ImageSettings, { accounts, t }))
         }
         function ImageSettings({ accounts, t }) {

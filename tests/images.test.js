@@ -32,7 +32,10 @@ function fixture(overrides = {}) {
   return { tool, exec, calls, writes, service, setSettings: value => { settings = value } }
 }
 test('image settings default off; supported model/quality pairs are validated', () => {
-  assert.deepEqual(Config({}), { chatFailover: false, images: IMAGE_DEFAULTS })
+  const { codexLiveSearch, ...config } = Config({})
+  assert.deepEqual(config, { chatFailover: false, images: IMAGE_DEFAULTS })
+  assert.equal(codexLiveSearch.get(), true)
+  assert.equal(Config({ codexLiveSearch: false }).codexLiveSearch.get(), false)
   assert.deepEqual(validateImageSettings(IMAGE_DEFAULTS), IMAGE_DEFAULTS)
   assert.throws(() => validateImageSettings({ ...IMAGE_DEFAULTS, quality: 'max' }), /Invalid/)
   assert.equal(validateImageSettings({ ...IMAGE_DEFAULTS, model: 'gpt-image-2.5-flare', quality: 'max' }).quality, 'max')

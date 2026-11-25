@@ -92,7 +92,7 @@ function fixture({ language = 'en', account = baseAccount, handler, modelDirecto
     },
   }
   definition.factory(() => React).apply(ctx)
-  const renderSection = runner(), renderRow = runner()
+  const renderSection = runner(), renderRow = runner(), renderImages = runner()
   let fastKey, renderSwitch, fastOwner
   const closeMenu = () => {
     fastOwner?.effects.forEach(effect => effect.cleanup?.())
@@ -114,6 +114,10 @@ function fixture({ language = 'en', account = baseAccount, handler, modelDirecto
       const section = renderSection(Section)
       const row = nodes(section).find(node => node.type?.name === 'AccountRow')
       return { section, row: row ? renderRow(row.type, row.props) : null }
+    },
+    imageSettings(section = this.render().section) {
+      const card = nodes(section).find(node => node.type?.name === 'ImageSettings')
+      return renderImages(card.type, card.props)
     },
     refreshButton(section) { return nodes(section).find(node => node.type === 'button' && text(node) === dictionaries[language].refreshModels) },
     dispose() { runners.forEach(owner => owner.effects.forEach(effect => effect.cleanup?.())) },
@@ -215,6 +219,7 @@ test('older account responses without catalog metadata keep the shared refresh a
   const { row, section } = f.render()
   assert.ok(f.refreshButton(section))
   assert.equal(text(row).includes('undefined'), false)
+  assert.equal(nodes(section).some(node => node.props['aria-label'] === f.dictionaries.en.codexLiveSearch), false, 'older Hosts do not expose the preference')
   f.dispose()
 })
 
@@ -373,5 +378,114 @@ test('reopening the native menu during a Fast write waits before rereading', asy
   complete(); await writing; await flush()
   assert.equal(f.fastToggle().props['aria-checked'], true)
   assert.deepEqual(f.calls.map(call => call.action), ['fast-get', 'fast-set', 'fast-get'])
+  f.dispose()
+})
+
+const settingSwitch = (tree, label) => nodes(tree).find(node => node.props.role === 'switch' && node.props['aria-label'] === label)
+const success = value => ({ ok: true, value })
+
+for (const language of ['en', 'zh']) {
+  test(`Codex live search loads from Host and can be turned off even when unavailable (${language})`, async () => {
+    const f = fixture({ language, handler: input => {
+      if (input.action === 'list') return success({ accounts: [], codexLiveSearch: true, codexLiveSearchAvailable: false })
+      assert.equal(input.action, 'codex-live-search-save')
+      return success({ codexLiveSearch: input.enabled, ...(input.enabled ? { codexLiveSearchAvailable: true } : {}) })
+    } })
+    const toggle = section => settingSwitch(section, f.dictionaries[language].codexLiveSearch)
+    assert.equal(toggle(f.render().section), undefined, 'do not infer the preference before Host checked in')
+    await flush()
+    const { section } = f.render()
+    assert.equal(toggle(section).props['aria-checked'], true)
+    assert.equal(toggle(section).props.disabled, false, 'unsupported Hosts can still persist a preference')
+    const hint = f.dictionaries[language].codexLiveSearchHint
+    const unavailable = f.dictionaries[language].codexLiveSearchUnavailable
+    assert.equal(toggle(section).props['aria-description'], `${hint} ${unavailable}`)
+    assert.ok(nodes(section).some(node => node.type === 'p' && text(node) === unavailable))
+    await toggle(section).props.onClick()
+    const off = toggle(f.render().section)
+    assert.equal(off.props['aria-checked'], false)
+    assert.equal(off.props['aria-description'], `${hint} ${unavailable}`, 'the save response may omit availability')
+    await off.props.onClick()
+    assert.equal(toggle(f.render().section).props['aria-description'], hint, 'apply new availability when Host includes it')
+    assert.deepEqual(f.calls, [{ action: 'list' }, { action: 'codex-live-search-save', enabled: false }, { action: 'codex-live-search-save', enabled: true }])
+    f.dispose()
+  })
+}
+
+test('Codex live search keeps focus and ignores stale list responses during a save', async () => {
+  let finish, oldFocus, listCount = 0
+  const f = fixture({ handler: input => {
+    if (input.action === 'list') {
+      if (++listCount === 1) return success({ accounts: [], codexLiveSearch: true, chatFailover: false })
+      return new Promise(resolve => { oldFocus = resolve })
+    }
+    assert.equal(input.action, 'codex-live-search-save')
+    return new Promise(resolve => { finish = resolve })
+  } })
+  f.render(); await flush()
+  const { codexLiveSearch, chatFailover, imagesSaving } = f.dictionaries.en
+  const { section } = f.render()
+  const search = settingSwitch(section, codexLiveSearch)
+  assert.equal(search.props['aria-description'], f.dictionaries.en.codexLiveSearchHint)
+  f.listeners.get('focus')()
+  const pending = search.props.onClick()
+  await search.props.onClick()
+  const saving = f.render().section
+  assert.equal(settingSwitch(saving, codexLiveSearch).props['aria-busy'], true)
+  assert.equal(settingSwitch(saving, codexLiveSearch).props['aria-disabled'], true)
+  assert.equal(settingSwitch(saving, codexLiveSearch).props.disabled, false, 'keep native focus while saving')
+  assert.equal(settingSwitch(saving, codexLiveSearch).props['aria-checked'], true, 'keep the effective value while saving')
+  assert.ok(nodes(saving).some(node => node.props.role === 'status' && text(node) === imagesSaving))
+  assert.equal(settingSwitch(saving, chatFailover).props.disabled, false, 'do not lock unrelated settings')
+  assert.deepEqual(f.calls.map(call => call.action), ['list', 'list', 'codex-live-search-save'])
+  finish(success({ codexLiveSearch: false })); await pending
+  oldFocus(success({ accounts: [], codexLiveSearch: true, chatFailover: false })); await flush()
+  const saved = settingSwitch(f.render().section, codexLiveSearch)
+  assert.equal(saved.props['aria-checked'], false, 'a focus read begun before this save cannot undo it')
+  assert.equal(saved.props.disabled, false)
+  f.dispose()
+})
+
+test('Codex live search reports failures, unlocks, and uses the confirmed retry value', async () => {
+  let reject = true
+  const f = fixture({ handler: input => {
+    if (input.action === 'list') return success({ accounts: [], codexLiveSearch: false })
+    assert.equal(input.action, 'codex-live-search-save')
+    assert.equal(input.enabled, true)
+    return reject ? { ok: false, error: { message: 'Preference could not be saved' } } : success({ codexLiveSearch: true })
+  } })
+  const card = () => nodes(f.render().section).find(node => node.type === 'section' && node.props['aria-label'] === f.dictionaries.en.codexLiveSearch)
+  const toggle = () => settingSwitch(card(), f.dictionaries.en.codexLiveSearch)
+  const alert = () => nodes(card()).find(node => node.props.role === 'alert')
+  f.render(); await flush()
+  await toggle().props.onClick()
+  assert.equal(toggle().props['aria-checked'], false)
+  assert.equal(toggle().props.disabled, false)
+  assert.equal(text(alert()), 'Preference could not be saved')
+  reject = false
+  await toggle().props.onClick()
+  assert.equal(toggle().props['aria-checked'], true)
+  assert.equal(alert(), undefined)
+  f.dispose()
+})
+
+test('Codex live search does not save while login starts or remains active', async () => {
+  let finish
+  const f = fixture({ handler: input => {
+    if (input.action === 'list') return success({ accounts: [], codexLiveSearch: true })
+    assert.equal(input.action, 'login')
+    return new Promise(resolve => { finish = resolve })
+  } })
+  const button = label => nodes(f.render().section).find(node => node.type === 'button' && text(node) === label)
+  const toggle = () => settingSwitch(f.render().section, f.dictionaries.en.codexLiveSearch)
+  f.render(); await flush()
+  button(f.dictionaries.en.add).props.onClick()
+  const signingIn = button(f.dictionaries.en.browser).props.onClick()
+  assert.equal(toggle().props.disabled, true)
+  await toggle().props.onClick()
+  finish(success({ id: 'login-one', phase: 'waiting_browser' })); await signingIn
+  assert.equal(toggle().props.disabled, true)
+  await toggle().props.onClick()
+  assert.deepEqual(f.calls, [{ action: 'list' }, { action: 'login', method: 'browser' }])
   f.dispose()
 })
