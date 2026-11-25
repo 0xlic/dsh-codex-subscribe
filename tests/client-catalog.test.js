@@ -12,12 +12,13 @@ const baseAccount = { id: 'account-one', label: 'codex-one', suffix: 'one', emai
 
 // Actual Client module with component-local Hook state, effect cleanup and RPC.
 // This is an offline behavior test, not a browser layout/accessibility audit.
-function fixture({ language = 'en', account = baseAccount, handler } = {}) {
-  let definition, Section, dictionaries, current
+function fixture({ language = 'en', account = baseAccount, handler, modelDirectory, sessionId = 'session-one' } = {}) {
+  let definition, Section, FastOption, injectFast, dictionaries, current
+  const failures = []
   const calls = [], runners = [], listeners = new Map()
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(value => value !== false && value != null) }),
-    Fragment: 'fragment', useSyncExternalStore() {},
+    Fragment: 'fragment', useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
     useRef(initial) {
       const owner = current, index = owner.cursor++
       return owner.state[index] ??= { current: initial }
@@ -51,7 +52,11 @@ function fixture({ language = 'en', account = baseAccount, handler } = {}) {
     addEventListener: (name, fn) => listeners.set(name, fn),
     removeEventListener: name => listeners.delete(name),
   }, setTimeout, clearTimeout })
-  definition.factory(() => React).apply({
+  const ctx = {
+    inject(dependencies, fn) {
+      assert.equal(Array.from(dependencies).join(','), 'modelDirectories,remote.session')
+      if (modelDirectory) fn(ctx)
+    },
     effect: fn => fn(),
     locale: {
       register: (_namespace, value) => { dictionaries = value },
@@ -62,6 +67,10 @@ function fixture({ language = 'en', account = baseAccount, handler } = {}) {
       }, subscribe() {}, getSnapshot() {},
     },
     get: name => {
+      if (name === 'modelDirectories') return { directoryFor: id => {
+        assert.equal(id, sessionId)
+        return { store: { subscribe() {}, getSnapshot: modelDirectory } }
+      } }
       assert.equal(name, 'connection')
       return { rpc: { call: async (path, method, input) => {
         assert.equal(path, '/api'); assert.equal(method, 'codex-subscribe/manage')
@@ -73,12 +82,34 @@ function fixture({ language = 'en', account = baseAccount, handler } = {}) {
     },
     slots: {
       inject: (_name, fn) => fn(),
-      register: (options, component) => { if (options.name === 'settings.section') Section = component },
+      register: (options, component) => {
+        if (options.name === 'settings.section') Section = component
+        if (options.name === 'conversation.input.model.options') {
+          assert.equal(options.id, 'codex-subscribe-fast')
+          FastOption = component; injectFast = options.inject
+        }
+      },
     },
-  })
+  }
+  definition.factory(() => React).apply(ctx)
   const renderSection = runner(), renderRow = runner()
+  let fastKey, renderSwitch, fastOwner
+  const closeMenu = () => {
+    fastOwner?.effects.forEach(effect => effect.cleanup?.())
+    fastOwner = undefined; fastKey = undefined; renderSwitch = undefined
+  }
   return {
-    calls, dictionaries, listeners,
+    calls, dictionaries, listeners, failures, closeMenu,
+    fastToggle(locked = false) {
+      assert.ok(FastOption)
+      const child = FastOption({ ...injectFast(sessionId), sessionId, locked, reportFailure: message => failures.push(message) })
+      if (!child) { closeMenu(); return null }
+      if (child.props.key !== fastKey) {
+        closeMenu()
+        fastKey = child.props.key; renderSwitch = runner(); fastOwner = runners.at(-1)
+      }
+      return nodes(renderSwitch(child.type, child.props)).find(node => node.props.role === 'switch') ?? null
+    },
     render() {
       const section = renderSection(Section)
       const row = nodes(section).find(node => node.type?.name === 'AccountRow')
@@ -226,5 +257,121 @@ test('a failed refresh keeps its own error visible even when the follow-up reloa
   const view = f.render()
   assert.ok(nodes(view.section).some(node => node.props.role === 'alert' && text(node) === 'Catalog refresh failed'))
   assert.equal(f.refreshButton(view.section).props.disabled, false)
+  f.dispose()
+})
+
+const fastProvider = 'codex-sub-account-one'
+const fastModel = 'gpt-test-fast'
+const modelDirectory = (provider = fastProvider, model = fastModel, routable = true) => ({
+  current: { provider, model }, routable, groups: [{ id: provider, models: [{ id: model }] }],
+})
+const fastSuccess = (enabled, supported = true) => ({ ok: true, value: { supported, enabled } })
+
+for (const language of ['en', 'zh']) {
+  test(`native model menu reads and switches Fast on the exact account/model (${language})`, async () => {
+    const directory = modelDirectory()
+    let enabled = false, settle
+    const f = fixture({ language, modelDirectory: () => directory, handler: input => {
+      if (input.action === 'fast-get') return fastSuccess(enabled)
+      assert.equal(input.action, 'fast-set')
+      return new Promise(resolve => { settle = () => { enabled = input.enabled; resolve(fastSuccess(enabled)) } })
+    } })
+    assert.equal(f.fastToggle(), null, 'do not assume a capability before Host confirmation')
+    await flush()
+    const toggle = f.fastToggle()
+    assert.equal(text(toggle), f.dictionaries[language].fast)
+    assert.equal(toggle.props.title, f.dictionaries[language].fastHint)
+    assert.equal(toggle.props['aria-checked'], false)
+    assert.equal(f.fastToggle(true).props.disabled, true)
+    await f.fastToggle(true).props.onClick()
+    assert.equal(f.calls.length, 1, 'the native lock also guards the event handler')
+    const enabling = toggle.props.onClick()
+    await toggle.props.onClick()
+    assert.equal(f.fastToggle().props.disabled, false, 'saving should not drop menu focus')
+    assert.equal(f.fastToggle().props['aria-busy'], true)
+    assert.equal(f.fastToggle().props['aria-disabled'], true)
+    assert.equal(f.fastToggle().props['aria-checked'], false, 'no optimistic toggle')
+    settle(); await enabling
+    assert.equal(f.fastToggle().props['aria-checked'], true)
+    const disabling = f.fastToggle().props.onClick()
+    settle(); await disabling
+    assert.equal(f.fastToggle().props['aria-checked'], false)
+    assert.equal(f.fastToggle().props.disabled, false)
+    assert.deepEqual(f.calls, [
+      { action: 'fast-get', sessionId: 'session-one', provider: fastProvider, model: fastModel },
+      { action: 'fast-set', sessionId: 'session-one', provider: fastProvider, model: fastModel, enabled: true },
+      { action: 'fast-set', sessionId: 'session-one', provider: fastProvider, model: fastModel, enabled: false },
+    ])
+    f.dispose()
+  })
+}
+
+test('Fast hides for other providers, unavailable selections, and unsupported Codex models', async () => {
+  let directory = modelDirectory('deepseek'), settle
+  const f = fixture({ modelDirectory: () => directory,
+    handler: () => new Promise(resolve => { settle = resolve }) })
+  assert.equal(f.fastToggle(), null)
+  directory = modelDirectory(fastProvider, fastModel, false)
+  assert.equal(f.fastToggle(), null)
+  directory = { ...modelDirectory(), groups: [] }
+  assert.equal(f.fastToggle(), null)
+  await flush()
+  assert.deepEqual(f.calls, [])
+  directory = modelDirectory()
+  assert.equal(f.fastToggle(), null)
+  await flush()
+  settle(fastSuccess(false, false)); await flush()
+  assert.equal(f.fastToggle(), null)
+  assert.equal(f.calls.length, 1)
+  f.dispose()
+})
+
+test('Fast distinguishes a failed lookup from unsupported models', async () => {
+  const directory = modelDirectory()
+  const f = fixture({ modelDirectory: () => directory, handler: () => { throw new Error('offline') } })
+  assert.equal(f.fastToggle(), null)
+  await flush()
+  assert.equal(f.fastToggle(), null)
+  assert.deepEqual(f.failures, [f.dictionaries.en.fastReadFailed])
+  f.dispose()
+})
+
+test('Fast ignores stale reads and reports rejected writes through the native menu', async () => {
+  let directory = modelDirectory(), completeFirst
+  const f = fixture({ language: 'zh', modelDirectory: () => directory, handler: input => {
+    if (input.action === 'fast-set') return { ok: false, error: { message: 'write denied' } }
+    if (input.model === fastModel) return new Promise(resolve => { completeFirst = resolve })
+    return fastSuccess(false)
+  } })
+  f.fastToggle(); await flush()
+  directory = modelDirectory(fastProvider, 'gpt-test-new')
+  assert.equal(f.fastToggle(), null)
+  await flush()
+  completeFirst(fastSuccess(true)); await flush()
+  assert.equal(f.fastToggle().props['aria-checked'], false)
+  await f.fastToggle().props.onClick()
+  assert.equal(f.fastToggle().props.disabled, false)
+  assert.equal(f.fastToggle().props['aria-checked'], false)
+  assert.deepEqual(f.failures, [f.dictionaries.zh.fastFailed])
+  assert.equal(f.calls.at(-1).model, 'gpt-test-new')
+  f.dispose()
+})
+
+test('reopening the native menu during a Fast write waits before rereading', async () => {
+  const directory = modelDirectory()
+  let enabled = false, complete
+  const f = fixture({ modelDirectory: () => directory, handler: input => {
+    if (input.action === 'fast-get') return fastSuccess(enabled)
+    return new Promise(resolve => { complete = () => { enabled = input.enabled; resolve(fastSuccess(enabled)) } })
+  } })
+  f.fastToggle(); await flush()
+  const writing = f.fastToggle().props.onClick()
+  f.closeMenu()
+  assert.equal(f.fastToggle(), null)
+  await flush()
+  assert.deepEqual(f.calls.map(call => call.action), ['fast-get', 'fast-set'])
+  complete(); await writing; await flush()
+  assert.equal(f.fastToggle().props['aria-checked'], true)
+  assert.deepEqual(f.calls.map(call => call.action), ['fast-get', 'fast-set', 'fast-get'])
   f.dispose()
 })

@@ -49,7 +49,13 @@ function parseCatalog(payload) {
     seen.add(entry.slug)
     if (entry.visibility !== 'list') continue
     if (Array.isArray(entry.input_modalities) && !entry.input_modalities.some(value => value === 'text' || value === 'image')) continue
-    const model = { slug: entry.slug, visibility: 'list' }
+    const speedTiers = [
+      ...(Array.isArray(entry.additional_speed_tiers) ? entry.additional_speed_tiers : []),
+      ...(Array.isArray(entry.service_tiers) ? entry.service_tiers.map(tier => tier?.id) : []),
+    ]
+    const model = { slug: entry.slug, visibility: 'list',
+      additional_speed_tiers: speedTiers.some(tier => tier === 'fast' || tier === 'priority') ? ['priority'] : [],
+    }
     if (typeof entry.display_name === 'string' && entry.display_name.length <= 256 && !/[\x00-\x1f]/.test(entry.display_name)) model.display_name = entry.display_name
     for (const key of ['context_window', 'max_context_window']) if (positive(entry[key])) model[key] = entry[key]
     if (Number.isFinite(entry.effective_context_window_percent) && entry.effective_context_window_percent > 0 && entry.effective_context_window_percent <= 100) model.effective_context_window_percent = entry.effective_context_window_percent
@@ -213,7 +219,11 @@ export function createModelCatalog({
         try {
           if (!Number.isFinite(cached.savedAt) || cached.savedAt > now() || now() - cached.savedAt >= ttlMs) throw failure()
           const rawCatalog = parseCatalog(cached.rawCatalog)
-          entry = { savedAt: cached.savedAt, etag: etagValue(cached.etag), rawCatalog }
+          // Older versions discarded speed metadata. Fetch a full catalog once
+          // instead of perpetually revalidating that incomplete entry with 304.
+          const hasSpeedMetadata = Array.isArray(cached.rawCatalog?.models)
+            && cached.rawCatalog.models.every(model => Array.isArray(model?.additional_speed_tiers))
+          entry = { savedAt: cached.savedAt, etag: hasSpeedMetadata ? etagValue(cached.etag) : undefined, rawCatalog }
           models = mergeModels(baseModels(), rawCatalog)
           source = 'cached'
           notify()
@@ -291,6 +301,7 @@ export function createModelCatalog({
     ready: ({ signal } = {}) => invoke(false, signal),
     refresh: ({ signal } = {}) => invoke(true, signal),
     getModels: currentModels,
+    supportsFast: model => entry?.rawCatalog.models.some(item => item.slug === model && item.additional_speed_tiers.includes('priority')) === true,
     status: () => ({ source, refresh: refreshState, count: currentModels().length }),
     dispose() { if (!disposed) { disposed = true; generation++; lifetime.abort(); flight?.controller.abort() } },
   }

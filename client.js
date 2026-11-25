@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
         browser: 'Browser sign-in', device: 'Device code sign-in', empty: 'No registered accounts', loading: 'Loading…',
         edit: 'Edit suffix', suffix: 'Account suffix', save: 'Save', remove: 'Remove', renew: 'Sign in again', cancel: 'Cancel',
         chatFailover: 'Switch accounts when Codex quota is exhausted', chatFailoverHint: 'After another signed-in account successfully answers with the same model, it becomes the selected account for this conversation. Reset cards are never used automatically.',
+        fast: 'Fast mode', fastHint: 'Prioritize Codex requests. Fast mode may use more subscription quota.', fastFailed: 'Could not change Fast mode.', fastReadFailed: 'Could not load Fast mode.',
         images: 'Image generation', imagesEnable: 'Enable image generation', imagesHint: 'Changes are saved and applied automatically. The 2.5 models are experimental; availability depends on your subscription.',
         imagesModel: 'Image model', imagesQuality: 'Quality', imagesAccount: 'Account', imagesAuto: 'Automatic',
         imagesMissingAccount: 'Selected account is no longer registered', imagesSaving: 'Applying…', imagesSaved: 'Image settings applied.', retry: 'Retry',
@@ -30,6 +31,7 @@ window.__ModuleLoader__.load({
         browser: '浏览器登录', device: '设备代码登录', empty: '暂无已登录账号', loading: '加载中…',
         edit: '修改后缀', suffix: '账号后缀', save: '保存', remove: '移除', renew: '重新登录', cancel: '取消',
         chatFailover: 'Codex 额度不足时自动换号', chatFailoverHint: '另一个已登录账号用同一模型成功响应后，会成为本会话所选账号。不会自动使用重置卡。',
+        fast: 'Fast 模式', fastHint: '优先处理 Codex 请求，可能消耗更多订阅额度。', fastFailed: '无法更改 Fast 模式。', fastReadFailed: '无法读取 Fast 模式。',
         images: '图像生成', imagesEnable: '启用图像生成', imagesHint: '修改后自动保存并生效。2.5 模型为实验选项，能否使用取决于订阅权限。',
         imagesModel: '图像模型', imagesQuality: '质量', imagesAccount: '账号', imagesAuto: '自动选择',
         imagesMissingAccount: '所选账号已不再登录', imagesSaving: '正在应用…', imagesSaved: '图像设置已生效。', retry: '重试',
@@ -95,6 +97,86 @@ window.__ModuleLoader__.load({
           if (!result?.ok) throw new Error(result?.error?.message || t('error'))
           return result.value
         }
+        // Native model-directory state includes the effective default for sessions
+        // without an explicit model selection. Only the exact selected route is queried.
+        const fastSlot = 'conversation.input.model.options'
+        const fastWrites = new Map()
+        function FastOption({ sessionId, directory, locked, reportFailure }) {
+          const selection = React.useSyncExternalStore(fn => directory.subscribe(fn), () => directory.getSnapshot())
+          const { provider, model } = selection.current ?? {}
+          if (!selection.routable || !/^codex-sub-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(provider ?? '')) return null
+          const entry = selection.groups.find(group => group.id === provider)?.models.find(item => item.id === model)
+          if (!entry) return null
+          const routeKey = JSON.stringify([sessionId, provider, model])
+          return h(FastSwitch, { key: routeKey, routeKey, sessionId, provider, model, entry, locked, reportFailure })
+        }
+        function FastSwitch({ routeKey, sessionId, provider, model, entry, locked, reportFailure }) {
+          React.useSyncExternalStore(fn => ctx.locale.subscribe(fn), () => ctx.locale.getSnapshot())
+          const [status, setStatus] = React.useState(null)
+          const [pending, setPending] = React.useState(false)
+          const active = React.useRef(null)
+          React.useEffect(() => {
+            const owner = {}
+            active.current = owner
+            setPending(false)
+            const load = async () => {
+              // Closing and reopening the menu cannot read behind an in-flight save.
+              await fastWrites.get(routeKey)?.catch(() => {})
+              if (active.current !== owner) return
+              try {
+                const value = await call({ action: 'fast-get', sessionId, provider, model })
+                if (active.current === owner) setStatus({ entry, value })
+              } catch {
+                if (active.current === owner) {
+                  setStatus(null)
+                  reportFailure(t('fastReadFailed'))
+                }
+              }
+            }
+            void load()
+            return () => { if (active.current === owner) active.current = null }
+          }, [routeKey, sessionId, provider, model, entry])
+          if (status?.entry !== entry || status.value?.supported !== true) return null
+          const enabled = status.value.enabled === true
+          const toggle = async () => {
+            const owner = active.current
+            if (!owner || locked || pending || fastWrites.has(routeKey)) return
+            setPending(true)
+            const write = call({ action: 'fast-set', sessionId, provider, model, enabled: !enabled })
+            fastWrites.set(routeKey, write)
+            try {
+              const value = await write
+              if (active.current !== owner) return
+              setStatus({ entry, value })
+              if (value?.supported !== true) reportFailure(t('fastFailed'))
+            } catch {
+              if (active.current === owner) reportFailure(t('fastFailed'))
+            } finally {
+              fastWrites.delete(routeKey)
+              if (active.current === owner) setPending(false)
+            }
+          }
+          return h(React.Fragment, null,
+            h('style', null, `
+              .csm-fast-row{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;min-height:34px;padding:0 8px;border:0;border-radius:var(--dsw-radius-md);background:none;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;text-align:start;cursor:pointer}
+              .csm-fast-row:disabled,.csm-fast-row[aria-disabled=true]{opacity:.55;cursor:default}
+              .csm-fast-row:not(:disabled):not([aria-disabled=true]):hover,.csm-fast-row:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}
+              .csm-fast-indicator{display:flex;align-items:center;flex:none;box-sizing:border-box;width:34px;height:20px;padding:2px;border-radius:10px;background:var(--dsw-alias-border-l2)}
+              .csm-fast-row[aria-checked=true] .csm-fast-indicator{background:var(--dsw-alias-brand-primary);justify-content:flex-end}
+              .csm-fast-indicator::after{content:'';width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-bg-base)}
+            `),
+            h('button', { className: 'csm-fast-row', type: 'button', role: 'switch', 'aria-checked': enabled,
+              title: t('fastHint'), 'aria-description': t('fastHint'), 'aria-busy': pending,
+              'aria-disabled': pending, disabled: locked, onClick: toggle },
+            t('fast'), h('span', { className: 'csm-fast-indicator', 'aria-hidden': true })))
+        }
+        ctx.inject(['modelDirectories', 'remote.session'], scope => {
+          const directories = scope.get('modelDirectories')
+          scope.slots.inject(fastSlot, () => scope.slots.register({
+            name: fastSlot, id: 'codex-subscribe-fast',
+            inject: sessionId => ({ directory: directories.directoryFor(sessionId).store }),
+          }, FastOption))
+        })
         const isActive = login => login && !['authenticated', 'failed', 'cancelled'].includes(login.phase)
         function Section() {
           React.useSyncExternalStore(fn => ctx.locale.subscribe(fn), () => ctx.locale.getSnapshot())

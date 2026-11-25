@@ -91,6 +91,15 @@ export async function apply(ctx, config = {}) {
     },
   }) : undefined
   ctx.effect(() => () => { chatRouter?.dispose(); usage.dispose() })
+  // A user opt-in can affect Credits. Keep it in this running session only;
+  // don't inherit it in forks, other accounts/models, or after a restart.
+  const fastBySession = new WeakMap()
+  const getAgent = id => ctx.get?.('agents')?.get(id)
+  const fastKey = (provider, model) => JSON.stringify([provider, model])
+  function isFastEnabled({ sessionId, provider, model }) {
+    const session = getAgent(sessionId)?.session
+    return !!session && fastBySession.get(session)?.has(fastKey(provider, model)) === true
+  }
   const subscriptions = new Subscriptions({
     chatRouter,
     onRemoved: id => usage.invalidate(`codex-sub-${id.slice('account-'.length)}`),
@@ -105,7 +114,7 @@ export async function apply(ctx, config = {}) {
       return createModelCatalog({ ...options, baseModels: () => native.getModels(), cache })
     },
     accounts, llm: ctx.llm,
-    adapterFactory: options => createAccountAdapter({ ...options, resolveAttachments: () => ctx.get('attachments') }),
+    adapterFactory: options => createAccountAdapter({ ...options, isFastEnabled, resolveAttachments: () => ctx.get('attachments') }),
     authFactory: credentials => {
       const models = createModels({ credentials, authContext: { env: async () => undefined, fileExists: async () => false } })
       models.setProvider(openaiCodexProvider())
@@ -160,9 +169,31 @@ export async function apply(ctx, config = {}) {
     })))
   }
 
+  function fastSetting(input, write) {
+    const { sessionId, provider, model, enabled } = input
+    if ([sessionId, provider, model].some(value => typeof value !== 'string' || !value || value.length > 256)
+      || (write && typeof enabled !== 'boolean')) throw new UserError('Invalid Fast mode setting')
+    const agent = getAgent(sessionId)
+    const selection = agent?.model.current()
+    const route = [...subscriptions.routes.values()].find(entry => entry.provider === provider)
+    if (!agent?.session || selection?.provider !== provider || selection.model !== model
+      || route?.catalog?.supportsFast(model) !== true) {
+      if (write) throw new UserError('Fast mode is not available for this session and model')
+      return { supported: false, enabled: false }
+    }
+    const key = fastKey(provider, model)
+    let choices = fastBySession.get(agent.session)
+    if (write && enabled) {
+      if (!choices) fastBySession.set(agent.session, choices = new Set())
+      choices.add(key)
+    } else if (write) choices?.delete(key)
+    return { supported: true, enabled: choices?.has(key) === true }
+  }
   async function dispatch(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new UserError('Invalid operation')
     switch (input.action) {
+      case 'fast-get': return fastSetting(input, false)
+      case 'fast-set': return fastSetting(input, true)
       case 'images-settings': return imageSettings.get()
       case 'images-settings-save': {
         if (login.session && !['authenticated', 'failed', 'cancelled'].includes(login.session.view.phase)) throw new UserError('Finish or cancel sign-in before saving image settings')

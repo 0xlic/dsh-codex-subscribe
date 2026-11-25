@@ -34,11 +34,20 @@ function nativeRequest(options, route) {
   }
 }
 
-const quotaEvidence = new AsyncLocalStorage()
+const requestContext = new AsyncLocalStorage()
 
 function codexStreamOptions(options) {
   const { temperature: _unsupported, ...supported } = options ?? {}
-  const evidence = quotaEvidence.getStore()
+  const { evidence, fast } = requestContext.getStore() ?? {}
+  if (fast) {
+    supported.serviceTier = 'priority'
+    // pi-ai's streamSimple drops the top-level tier when it builds base options.
+    // onPayload survives that conversion and updates the outgoing Codex body.
+    const onPayload = supported.onPayload
+    supported.onPayload = async (payload, model) => ({
+      ...((await onPayload?.(payload, model)) ?? payload), service_tier: 'priority',
+    })
+  }
   if (!evidence) return supported
   const existing = supported.onProviderStreamEvent
   return { ...supported, async onResponse(response, model) {
@@ -51,9 +60,9 @@ function codexStreamOptions(options) {
   } }
 }
 
-async function* accountStream(start, route, trackQuota = false) {
+async function* accountStream(start, route, trackQuota = false, fast = false) {
   const evidence = trackQuota ? {} : undefined
-  const run = callback => evidence ? quotaEvidence.run(evidence, callback) : callback()
+  const run = callback => requestContext.run({ evidence, fast }, callback)
   const iterator = run(() => start()[Symbol.asyncIterator]())
   let done = false
   try {
@@ -78,13 +87,20 @@ async function* accountStream(start, route, trackQuota = false) {
 
 /** One instance per immutable account id, never a shared mutable active account. */
 class AccountAdapter extends LlmAdapter {
-  constructor(route, label, inner, catalog, chatRouter) {
+  constructor(route, label, inner, catalog, chatRouter, isFastEnabled) {
     super()
     this.route = route
     this.label = typeof label === 'function' ? label : () => label
     this.inner = inner
     this.catalog = catalog
     this.chatRouter = chatRouter
+    this.isFastEnabled = isFastEnabled
+  }
+
+  useFast(options) {
+    return options.purpose === undefined && !!options.sessionId
+      && this.catalog?.supportsFast?.(options.model) === true
+      && this.isFastEnabled?.(options) === true
   }
 
   assertRoute(provider) {
@@ -132,7 +148,7 @@ class AccountAdapter extends LlmAdapter {
       stream: options => {
         this.assertRoute(options.provider)
         return accountStream(() => prepared.stream(nativeRequest(options, this.route)), this.route,
-          !!this.chatRouter && !!options.sessionId && options.purpose === undefined)
+          !!this.chatRouter && !!options.sessionId && options.purpose === undefined, this.useFast(options))
       },
     }
   }
@@ -153,7 +169,7 @@ class AccountAdapter extends LlmAdapter {
       return
     }
     await this.catalog?.ready({ signal: options.signal })
-    yield* accountStream(() => this.inner.stream(nativeRequest(options, this.route)), this.route)
+    yield* accountStream(() => this.inner.stream(nativeRequest(options, this.route)), this.route, false, this.useFast(options))
   }
 }
 
@@ -169,6 +185,7 @@ export function createAccountAdapter({
   resolveAttachments,
   catalog,
   chatRouter,
+  isFastEnabled,
   providerFactory = openaiCodexProvider,
   adapterFactory = config => new PiAiAdapter(config),
 }) {
@@ -243,5 +260,5 @@ export function createAccountAdapter({
     auth: { authContext: { env: async () => undefined, fileExists: async () => false } },
     resolveAttachments,
   })
-  return new AccountAdapter(route, label, inner, catalog, chatRouter)
+  return new AccountAdapter(route, label, inner, catalog, chatRouter, isFastEnabled)
 }

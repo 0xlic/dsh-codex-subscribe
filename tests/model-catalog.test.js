@@ -190,12 +190,33 @@ test('ETag sent from disk; 304 reuses catalog and refreshes cache timestamp', as
     assert.equal(options.headers['If-None-Match'], '"old"')
     return new Response(null, { status: 304, headers: { etag: '"new"' } })
   } })
-  f.disk.set('account-a', { savedAt: 900, etag: '"old"', rawCatalog: payload() })
+  const rawCatalog = payload()
+  for (const model of rawCatalog.models) model.additional_speed_tiers = model.slug === 'future-codex' ? ['priority'] : []
+  f.disk.set('account-a', { savedAt: 900, etag: '"old"', rawCatalog })
   await f.catalog.ready()
   assert.equal(f.catalog.status().source, 'online')
   assert.equal(f.disk.get('account-a').etag, '"new"')
   assert.equal(f.disk.get('account-a').savedAt, 1000)
   assert.equal(f.catalog.getModels().at(-1).id, 'future-codex')
+  assert.equal(f.catalog.supportsFast('future-codex'), true)
+  assert.equal(f.catalog.supportsFast('unknown'), false)
+})
+
+test('old caches re-fetch speed metadata; Ultrafast alone does not enable Fast', async () => {
+  const f = fixture({ fetch: async (_url, options) => {
+    assert.equal(options.headers['If-None-Match'], undefined)
+    return response({ models: [
+      { slug: 'fast', visibility: 'list', additional_speed_tiers: ['fast'] },
+      { slug: 'priority', visibility: 'list', service_tiers: [{ id: 'priority' }] },
+      { slug: 'ultrafast', visibility: 'list', additional_speed_tiers: ['ultrafast'] },
+    ] })
+  } })
+  f.disk.set('account-a', { savedAt: 900, etag: '"legacy"', rawCatalog: payload() })
+  assert.equal(f.catalog.supportsFast('known'), false)
+  await f.catalog.ready()
+  assert.equal(f.catalog.supportsFast('fast'), true)
+  assert.equal(f.catalog.supportsFast('priority'), true)
+  assert.equal(f.catalog.supportsFast('ultrafast'), false)
 })
 
 test('ETag from 200 is reused on manual refresh, 304 without prior catalog fails safely', async () => {

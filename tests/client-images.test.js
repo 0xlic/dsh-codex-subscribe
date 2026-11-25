@@ -44,6 +44,7 @@ function fixture({ language = 'en', initial = defaults, handler } = {}) {
     window: { __ModuleLoader__: { load: value => { definition = value } } }, setTimeout, clearTimeout,
   })
   const ctx = {
+    inject() {}, // model-menu services are not present in this image fixture
     effect: fn => fn(),
     locale: {
       register: (namespace, value) => { dictionaries = value },

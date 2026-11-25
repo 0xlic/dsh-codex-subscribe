@@ -18,7 +18,7 @@
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
       "platform": "web",
-      "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-tool", "@deepseek-ai/dsh-client-ui-attachment"]
+      "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-model-selection", "@deepseek-ai/dsh-client-ui-tool", "@deepseek-ai/dsh-client-ui-attachment"]
     }
   },
   "engines": { "node": ">=22.19.0", "dsh": ">=0.2.2-rc.1 <0.2.3-0" },
